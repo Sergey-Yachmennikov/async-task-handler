@@ -110,6 +110,7 @@ Kafka гарантирует доставку «хотя бы один раз»:
 | PostgreSQL | 17 |
 | Apache Kafka | 4.2.1, KRaft (без ZooKeeper) |
 | Liquibase | 5.0.3 |
+| MapStruct | 1.6.3 |
 | springdoc-openapi | 3.1.1 |
 | Testcontainers | 2.0.5 |
 
