@@ -64,6 +64,5 @@ public class TaskClaimService {
      * где персистентный контекст уже закрыт, и обращение к ленивому состоянию
      * такой сущности привело бы к ошибке.
      */
-    public record ClaimedTask(Long id, long durationMs) {
-    }
+    public record ClaimedTask(Long id, long durationMs) {}
 }

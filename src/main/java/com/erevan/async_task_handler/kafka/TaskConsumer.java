@@ -30,6 +30,7 @@ public class TaskConsumer {
             groupId = "${spring.kafka.consumer.group-id}")
     public void consume(ConsumerRecord<String, TaskRequestDto> message) {
         TaskRequestDto request = message.value();
+
         log.debug("Получено сообщение: partition={}, offset={}, key={}",
                 message.partition(), message.offset(), message.key());
 

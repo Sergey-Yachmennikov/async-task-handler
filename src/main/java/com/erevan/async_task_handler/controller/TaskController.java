@@ -37,7 +37,7 @@ public class TaskController implements TaskApi {
     @PostMapping
     public ResponseEntity<TaskAcceptedDto> submitTask(@RequestBody TaskRequestDto request) {
         String correlationKey = taskProducer.send(request);
-        // 202, а не 201: ресурс на момент ответа ещё не создан
+
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(new TaskAcceptedDto("Задача принята в обработку", correlationKey));
     }
