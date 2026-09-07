@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-5.0.xsd">
+
+    <!--
+      Эти два изменения вынесены в .sql и импортированы через <sqlFile>:
+      CHECK-ограничения и частичные индексы не выражаются XML-тегами Liquibase.
+    -->
+
+    <changeSet id="002-01-tasks-check-constraints" author="erevan">
+        <comment>CHECK-ограничения целостности на уровне БД</comment>
+        <sqlFile path="sql/002-01-check-constraints.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            ALTER TABLE tasks DROP CONSTRAINT chk_tasks_status;
+            ALTER TABLE tasks DROP CONSTRAINT chk_tasks_progress_range;
+            ALTER TABLE tasks DROP CONSTRAINT chk_tasks_duration_positive;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="002-02-tasks-new-queue-index" author="erevan">
+        <comment>Частичный индекс под запрос захвата задач воркерами</comment>
+        <sqlFile path="sql/002-02-partial-index.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            DROP INDEX idx_tasks_new_queue;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,7 @@
+# Профиль для запуска внутри docker-compose: отличается только адресами,
+# всё остальное наследуется из application.yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/taskdb
+  kafka:
+    bootstrap-servers: kafka:9092

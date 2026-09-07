@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-5.0.xsd">
+
+    <changeSet id="003-01-add-retry-count" author="erevan">
+        <comment>Счётчик попыток: ограничивает бесконечный перезапуск зависших задач</comment>
+        <addColumn tableName="tasks">
+            <column name="retry_count" type="INT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="003-02-add-dedup-key" author="erevan">
+        <comment>Ключ дедупликации входящих сообщений Kafka</comment>
+        <addColumn tableName="tasks">
+            <!--
+              Nullable намеренно: сообщение может прийти без ключа, и тогда
+              дедуплицировать его не по чему. В PostgreSQL уникальный индекс
+              допускает сколько угодно NULL, так что такие задачи друг другу
+              не мешают.
+            -->
+            <column name="dedup_key" type="VARCHAR(255)"/>
+        </addColumn>
+        <addUniqueConstraint tableName="tasks" columnNames="dedup_key"
+                             constraintName="uq_tasks_dedup_key"/>
+    </changeSet>
+
+    <changeSet id="003-03-stuck-tasks-index" author="erevan">
+        <comment>Частичный индекс под поиск зависших задач</comment>
+        <sqlFile path="sql/003-03-stuck-tasks-index.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            DROP INDEX idx_tasks_stuck;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,123 @@
+# Полное окружение: PostgreSQL, Kafka, веб-интерфейс к ней и сам сервис.
+#
+#   docker compose up -d --build              один инстанс
+#   docker compose up -d --build --scale app=3   три инстанса на общей БД
+#
+# Ключ version: намеренно отсутствует — в Compose Spec он устарел
+# и current-версии docker compose выводят на него предупреждение.
+
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # container_name здесь не задаётся намеренно: фиксированное имя сделало бы
+    # невозможным --scale, ведь два контейнера не могут называться одинаково
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+    ports:
+      # Диапазон, а не один порт: при масштабировании каждый инстанс
+      # получает свой порт на хосте. Жёсткое "8080:8080" сломало бы --scale
+      - "8080-8085:8080"
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: ath-postgres
+    environment:
+      POSTGRES_DB: taskdb
+      POSTGRES_USER: taskuser
+      POSTGRES_PASSWORD: taskpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U taskuser -d taskdb" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  kafka:
+    # Официальный образ Apache Kafka: KRaft из коробки, ZooKeeper не нужен.
+    # Версия совпадает с kafka-clients из BOM Spring Boot 4.1.1
+    image: apache/kafka:4.2.1
+    container_name: ath-kafka
+    ports:
+      # 9092 слушается только внутри сети compose,
+      # наружу отдаётся отдельный листенер на 29092 — см. ADVERTISED_LISTENERS
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Два клиентских листенера: контейнеры ходят на kafka:9092,
+      # процессы с хоста — на localhost:29092. Без этой пары приложение,
+      # запущенное вне Docker, получит из метаданных адрес kafka:9092
+      # и не сможет его отрезолвить.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+
+      # Кластер из одного узла: реплицировать служебные топики не на кого
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Ноль вместо дефолтных 3с: консьюмер-группа собирается сразу при старте
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    networks:
+      - app-network
+    healthcheck:
+      # В образе apache/kafka скрипты лежат в /opt/kafka/bin и имеют суффикс .sh
+      # (в confluentinc/cp-kafka они называются иначе — kafka-topics без расширения)
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-ui:
+    # Форк kafbat — развитие архивированного provectuslabs/kafka-ui
+    image: ghcr.io/kafbat/kafka-ui:v1.0.0
+    container_name: ath-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8090:8080"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+
+networks:
+  app-network:
+    driver: bridge
