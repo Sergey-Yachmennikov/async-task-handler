@@ -33,6 +33,10 @@ public class TaskRunner {
             simulateWork(task);
             statusUpdater.markCompleted(task.id(),
                     "Задача выполнена за " + task.durationMs() + " мс");
+            // Логируется уже после фиксации транзакции: markCompleted вызывается
+            // через прокси, и её транзакция закрывается вместе с возвратом
+            // из метода. Запись изнутри транзакции соврала бы при неудачном коммите
+            log.info("Задача {} завершена успешно", task.id());
             taskMetrics.recordCompleted(Duration.ofNanos(System.nanoTime() - startedAt));
         } catch (InterruptedException e) {
             // Прилетает при остановке сервиса. Флаг прерывания обязательно

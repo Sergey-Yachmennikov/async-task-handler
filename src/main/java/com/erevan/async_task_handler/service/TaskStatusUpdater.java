@@ -21,6 +21,14 @@ import java.time.Instant;
  * работающего вне транзакции, и обращение к ним изнутри того же класса
  * прошло бы мимо прокси Spring — аннотации {@code @Transactional}
  * и {@code @Retryable} просто не сработали бы.
+ * <p>
+ * Каждая запись проверяет, что задача всё ещё принадлежит текущей попытке.
+ * Без такой проверки возможен следующий сценарий: воркер подвис — долгая
+ * пауза сборщика мусора, приостановленная виртуалка, — восстановление сочло
+ * задачу зависшей и вернуло в очередь, её захватил другой инстанс и начал
+ * выполнять. Очнувшийся воркер записал бы свой результат поверх чужой
+ * выполняющейся попытки. Проверка делает корректность независимой от того,
+ * насколько верно настроен порог зависания.
  */
 @Slf4j
 @Service
@@ -28,12 +36,16 @@ import java.time.Instant;
 public class TaskStatusUpdater {
 
     private final TaskRepository taskRepository;
+    private final WorkerIdentity workerIdentity;
 
     /** Промежуточный результат: доля выполнения, видна через REST по ходу работы. */
     @Retryable(includes = OptimisticLockingFailureException.class, maxRetries = 3, delay = 100, multiplier = 2)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void updateProgress(Long taskId, int progress) {
         Task task = findOrThrow(taskId);
+        if (notOwnedByCurrentAttempt(task, "сохранение прогресса")) {
+            return;
+        }
         task.setProgress(progress);
     }
 
@@ -41,21 +53,44 @@ public class TaskStatusUpdater {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markCompleted(Long taskId, String result) {
         Task task = findOrThrow(taskId);
+        if (notOwnedByCurrentAttempt(task, "запись успешного завершения")) {
+            return;
+        }
         task.setStatus(TaskStatus.COMPLETED);
         task.setProgress(100);
         task.setResult(result);
         task.setFinishedAt(Instant.now());
-        log.info("Задача {} завершена успешно", taskId);
     }
 
     @Retryable(includes = OptimisticLockingFailureException.class, maxRetries = 3, delay = 100, multiplier = 2)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markFailed(Long taskId, String errorMessage) {
         Task task = findOrThrow(taskId);
+        if (notOwnedByCurrentAttempt(task, "запись ошибки")) {
+            return;
+        }
         task.setStatus(TaskStatus.FAILED);
         task.setErrorMessage(errorMessage);
         task.setFinishedAt(Instant.now());
-        log.warn("Задача {} завершена с ошибкой: {}", taskId, errorMessage);
+    }
+
+    /**
+     * Задача считается своей, только если она всё ещё выполняется и числится
+     * за этим инстансом.
+     * <p>
+     * Гонку между этой проверкой и коммитом закрывает {@code @Version}: успей
+     * кто-то изменить строку следом, коммит упадёт с конфликтом версий,
+     * {@code @Retryable} перечитает задачу и увидит уже новое состояние.
+     */
+    private boolean notOwnedByCurrentAttempt(Task task, String action) {
+        boolean owned = task.getStatus() == TaskStatus.IN_PROGRESS
+                && workerIdentity.id().equals(task.getWorkerId());
+        if (!owned) {
+            log.warn("Задача {} больше не принадлежит этой попытке (статус {}, владелец {}) — "
+                            + "{} пропущено",
+                    task.getId(), task.getStatus(), task.getWorkerId(), action);
+        }
+        return !owned;
     }
 
     private Task findOrThrow(Long taskId) {

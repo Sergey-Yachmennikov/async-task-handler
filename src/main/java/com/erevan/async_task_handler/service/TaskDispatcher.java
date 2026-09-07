@@ -44,8 +44,31 @@ public class TaskDispatcher {
          * её всё ещё в статусе NEW.
          */
         log.info("Взято в работу задач: {} из {} свободных слотов", claimed.size(), freeSlots);
-        for (ClaimedTask task : claimed) {
-            workerPool.submit(() -> taskRunner.run(task));
+        dispatch(claimed);
+    }
+
+    /**
+     * Раздаёт захваченную пачку воркерам, возвращая в очередь остаток,
+     * если раздача сорвалась.
+     * <p>
+     * Исполнитель отклоняет задачи, когда сервис останавливается. Оборвись
+     * цикл на середине без обработки — оставшиеся задачи так и остались бы
+     * помеченными IN_PROGRESS, хотя выполнять их некому.
+     */
+    private void dispatch(List<ClaimedTask> claimed) {
+        int dispatched = 0;
+        try {
+            for (; dispatched < claimed.size(); dispatched++) {
+                ClaimedTask task = claimed.get(dispatched);
+                workerPool.submit(() -> taskRunner.run(task));
+            }
+        } catch (RuntimeException e) {
+            // Задача с индексом dispatched в пул не попала: submit возвращает
+            // разрешение семафора перед тем, как пробросить исключение
+            List<ClaimedTask> stranded = claimed.subList(dispatched, claimed.size());
+            log.error("Раздача задач прервана после {} из {}, возвращаем остаток в очередь",
+                    dispatched, claimed.size(), e);
+            claimService.releaseClaim(stranded.stream().map(ClaimedTask::id).toList());
         }
     }
 }

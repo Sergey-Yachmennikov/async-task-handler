@@ -58,6 +58,40 @@ public class TaskClaimService {
     }
 
     /**
+     * Возвращает в очередь задачи, которые были захвачены, но так и не попали
+     * в пул воркеров.
+     * <p>
+     * Нужно, когда постановка в пул сорвалась на середине пачки — например,
+     * исполнитель отклонил задачу из-за начавшейся остановки сервиса.
+     * Эти задачи уже помечены IN_PROGRESS, но выполнять их некому: без возврата
+     * они провисели бы до срабатывания восстановления зависших, то есть
+     * четверть часа при настройках по умолчанию.
+     * <p>
+     * Проверка владельца обязательна: пока мы сюда добрались, задачу мог
+     * перехватить кто-то ещё, и сбрасывать чужую работу в NEW нельзя.
+     */
+    @Transactional
+    public void releaseClaim(List<Long> taskIds) {
+        if (taskIds.isEmpty()) {
+            return;
+        }
+
+        List<Task> tasks = taskRepository.findAllById(taskIds);
+        int released = 0;
+        for (Task task : tasks) {
+            if (task.getStatus() != TaskStatus.IN_PROGRESS
+                    || !workerIdentity.id().equals(task.getWorkerId())) {
+                continue;
+            }
+            task.setStatus(TaskStatus.NEW);
+            task.setStartedAt(null);
+            task.setWorkerId(null);
+            released++;
+        }
+        log.warn("Возвращено в очередь задач: {} из {}", released, taskIds.size());
+    }
+
+    /**
      * Данные захваченной задачи, передаваемые воркеру.
      * <p>
      * Передаётся именно снимок, а не сущность: объект уходит в другой поток,

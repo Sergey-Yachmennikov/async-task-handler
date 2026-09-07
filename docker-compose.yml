@@ -20,11 +20,18 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      SPRING_PROFILES_ACTIVE: docker
+      # Адреса и учётные данные приходят переменными окружения, а не отдельным
+      # профилем: одно и то же приложение настраивается снаружи, без пересборки
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USERNAME: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       # Диапазон, а не один порт: при масштабировании каждый инстанс
       # получает свой порт на хосте. Жёсткое "8080:8080" сломало бы --scale
-      - "8080-8085:8080"
+      - "${APP_PORTS}:8080"
     networks:
       - app-network
     healthcheck:
@@ -39,17 +46,17 @@ services:
     image: postgres:17-alpine
     container_name: ath-postgres
     environment:
-      POSTGRES_DB: taskdb
-      POSTGRES_USER: taskuser
-      POSTGRES_PASSWORD: taskpass
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - app-network
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U taskuser -d taskdb" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -64,7 +71,7 @@ services:
     ports:
       # 9092 слушается только внутри сети compose,
       # наружу отдаётся отдельный листенер на 29092 — см. ADVERTISED_LISTENERS
-      - "29092:29092"
+      - "${KAFKA_EXTERNAL_PORT}:29092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -77,7 +84,7 @@ services:
       # запущенное вне Docker, получит из метаданных адрес kafka:9092
       # и не сможет его отрезолвить.
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_EXTERNAL_PORT}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
 
       # Кластер из одного узла: реплицировать служебные топики не на кого
@@ -110,7 +117,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       DYNAMIC_CONFIG_ENABLED: "true"
     ports:
-      - "8090:8080"
+      - "${KAFKA_UI_PORT}:8080"
     networks:
       - app-network
     restart: unless-stopped

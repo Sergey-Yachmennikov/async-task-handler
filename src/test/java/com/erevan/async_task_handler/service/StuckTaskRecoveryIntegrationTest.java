@@ -13,6 +13,7 @@ import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -25,15 +26,18 @@ import static org.awaitility.Awaitility.await;
  */
 @TestPropertySource(properties = {
         "app.recovery.enabled=true",
-        // Порог занижен до трёх секунд, чтобы не ждать в тесте штатные 15 минут.
-        // Ниже опускать не стоит: тест «недавно начатой» задачи должен успеть
-        // отработать несколько циклов восстановления, не выйдя за этот порог
-        "app.recovery.stuck-timeout-ms=3000",
+        /*
+         * Порог зависания намеренно оставлен штатным: занизить его нельзя,
+         * межполевая проверка требует превышения предельной длительности
+         * задачи и уронила бы контекст. Вместо этого состариваются сами
+         * задачи — им проставляется давний started_at. Ускоряется только
+         * период проверки, чтобы не ждать штатные полминуты.
+         */
         "app.recovery.interval-ms=200",
         "app.recovery.max-retries=2"
 })
-// Контекст закрывается вместе с классом: планировщик восстановления с таким
-// коротким порогом испортил бы данные последующих тестов
+// Контекст закрывается вместе с классом: иначе планировщик восстановления
+// продолжил бы опрашивать общую БД во время последующих тестов
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class StuckTaskRecoveryIntegrationTest extends AbstractIntegrationTest {
 
@@ -48,7 +52,7 @@ class StuckTaskRecoveryIntegrationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("Зависшая задача возвращается в очередь с инкрементом попыток")
     void stuckTaskReturnsToQueue() {
-        Task stuck = taskRepository.save(inProgressSince(Instant.now().minusSeconds(60), 0, 40));
+        Task stuck = taskRepository.save(inProgressSince(Instant.now().minus(30, ChronoUnit.MINUTES), 0, 40));
 
         await().atMost(Duration.ofSeconds(20))
                 .untilAsserted(() -> assertThat(taskRepository.findById(stuck.getId()))
@@ -67,7 +71,7 @@ class StuckTaskRecoveryIntegrationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("Исчерпав попытки, зависшая задача признаётся провалившейся")
     void exhaustedTaskBecomesFailed() {
-        Task stuck = taskRepository.save(inProgressSince(Instant.now().minusSeconds(60), 2, 70));
+        Task stuck = taskRepository.save(inProgressSince(Instant.now().minus(30, ChronoUnit.MINUTES), 2, 70));
 
         await().atMost(Duration.ofSeconds(20))
                 .untilAsserted(() -> assertThat(taskRepository.findById(stuck.getId()))
@@ -84,9 +88,9 @@ class StuckTaskRecoveryIntegrationTest extends AbstractIntegrationTest {
     void freshlyStartedTaskIsLeftAlone() throws InterruptedException {
         Task fresh = taskRepository.save(inProgressSince(Instant.now(), 0, 10));
 
-        // Секунда — это пять проходов восстановления при интервале 200 мс,
-        // и всё ещё втрое меньше порога зависания. Если задачу заберут,
-        // значит порог не проверяется вовсе
+        // Секунда — это пять проходов восстановления при интервале 200 мс.
+        // До штатного порога в 15 минут задаче бесконечно далеко, так что
+        // забрать её могут только при полностью сломанной проверке порога
         Thread.sleep(1_000);
 
         assertThat(taskRepository.findById(fresh.getId()))

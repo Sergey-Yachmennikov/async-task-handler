@@ -139,6 +139,32 @@ docker compose ps
 | Metrics | http://localhost:8080/actuator/prometheus |
 | kafka-ui | http://localhost:8090 |
 
+### Connection settings
+
+Credentials and ports live in [`.env`](.env), which Compose reads automatically:
+
+```dotenv
+POSTGRES_DB=taskdb
+POSTGRES_USER=taskuser
+POSTGRES_PASSWORD=taskpass
+POSTGRES_PORT=5432
+KAFKA_EXTERNAL_PORT=29092
+APP_PORTS=8080-8085
+KAFKA_UI_PORT=8090
+```
+
+Compose passes them to the application as `DB_HOST`, `DB_NAME`, `DB_USERNAME`,
+`DB_PASSWORD` and `KAFKA_BOOTSTRAP_SERVERS`. There is no Spring profile for
+Docker: the same image is configured entirely from the outside.
+
+`application.yaml` declares defaults for every one of those variables, so
+running from the host without any environment set still works against the
+Compose infrastructure.
+
+The values committed here are development defaults. In a real deployment this
+file holds real credentials, belongs in `.gitignore`, and the secrets come from
+the orchestrator instead.
+
 ### Multiple instances
 
 ```bash

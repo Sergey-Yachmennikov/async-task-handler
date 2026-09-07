@@ -1,5 +1,8 @@
 package com.erevan.async_task_handler.config;
 
+import com.erevan.async_task_handler.domain.TaskConstraints;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -11,9 +14,17 @@ import org.springframework.validation.annotation.Validated;
  * Типобезопасная привязка вместо россыпи {@code @Value}: неверное значение
  * ловится на старте приложения, а не в момент первого обращения к полю.
  */
+/*
+ * @Valid на каждой вложенной записи обязателен и это не формальность.
+ * @Validated включает проверку самого объекта, но Bean Validation не спускается
+ * во вложенные объекты без явного указания каскада. Без этих аннотаций все
+ * ограничения ниже — @Min, @NotBlank, @AssertTrue — остаются просто разметкой:
+ * никакой ошибки при этом не выводится, конфигурация молча принимает
+ * любые значения.
+ */
 @Validated
 @ConfigurationProperties("app")
-public record AppProperties(Kafka kafka, Worker worker, Recovery recovery) {
+public record AppProperties(@Valid Kafka kafka, @Valid Worker worker, @Valid Recovery recovery) {
 
     public record Kafka(
 
@@ -89,5 +100,23 @@ public record AppProperties(Kafka kafka, Worker worker, Recovery recovery) {
             @Min(1)
             int batchSize
     ) {
+
+        /**
+         * Порог зависания обязан превышать предельную длительность задачи.
+         * <p>
+         * Проверка межполевая, и она закрывает единственный способ незаметно
+         * испортить данные конфигурацией. Поставь порог меньше — и восстановление
+         * отберёт задачу у живого воркера, который её честно выполняет: она
+         * вернётся в очередь, её захватит другой инстанс, и задача выполнится
+         * дважды. Ни исключения, ни отказа при этом не будет.
+         * <p>
+         * Раньше это требование жило только в комментарии. Теперь неверное
+         * сочетание значений роняет приложение на старте.
+         */
+        @AssertTrue(message = "app.recovery.stuck-timeout-ms должен превышать "
+                + "максимальную длительность задачи (" + TaskConstraints.MAX_DURATION_MS + " мс)")
+        public boolean isStuckTimeoutAboveMaxTaskDuration() {
+            return stuckTimeoutMs > TaskConstraints.MAX_DURATION_MS;
+        }
     }
 }
