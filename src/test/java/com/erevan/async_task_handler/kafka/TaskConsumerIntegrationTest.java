@@ -17,9 +17,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -38,6 +39,9 @@ class TaskConsumerIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
+
+    @Autowired
+    private KafkaTemplate<String, byte[]> byteArrayKafkaTemplate;
 
     @Autowired
     private TaskRepository taskRepository;
@@ -110,13 +114,40 @@ class TaskConsumerIntegrationTest extends AbstractIntegrationTest {
                         .singleElement()
                         .satisfies(task -> assertThat(task.getName()).isEqualTo("valid-task")));
 
-        assertThat(readDeadLetterKeys())
-                .as("отбракованное сообщение должно сохраниться в %s", dltTopic)
-                .contains("bad-key");
+        // В ожидании, а не разовой проверкой: топик неисправимых общий на класс,
+        // и первый же опрос может вернуть сообщение соседнего теста,
+        // не дождавшись нужного
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(readDeadLetterMessages())
+                        .as("отбракованное сообщение должно сохраниться в %s", dltTopic)
+                        .containsKey("bad-key"));
     }
 
-    /** Вычитывает ключи всех сообщений, накопившихся в топике неисправимых. */
-    private List<String> readDeadLetterKeys() {
+    @Test
+    @DisplayName("Неразобранное сообщение попадает в DLT байт в байт")
+    void unparseableMessageKeepsRawBytesInDeadLetterTopic() {
+        // Отправляется заведомо не-JSON, чтобы сломать десериализацию:
+        // такое сообщение доезжает до получателя DLT сырыми байтами
+        byte[] malformed = "{ это не json".getBytes(StandardCharsets.UTF_8);
+        byteArrayKafkaTemplate.send(topic, "malformed-key", malformed);
+
+        /*
+         * Проверяется именно содержимое, а не факт доставки. Получатель DLT
+         * выбирает шаблон перебором типов, и Object.class подходит в том числе
+         * массиву байт. Стоит ему оказаться раньше byte[].class — тело уедет
+         * через JSON-сериализатор и превратится в строку base64. Ключ при этом
+         * останется правильным, так что проверка одного ключа такую подмену
+         * не заметит.
+         */
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(readDeadLetterMessages())
+                        .containsKey("malformed-key")
+                        .extractingByKey("malformed-key")
+                        .isEqualTo(malformed));
+    }
+
+    /** Вычитывает сообщения, накопившиеся в топике неисправимых: ключ → тело. */
+    private Map<String, byte[]> readDeadLetterMessages() {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "dlt-verifier-" + UUID.randomUUID());
@@ -128,13 +159,13 @@ class TaskConsumerIntegrationTest extends AbstractIntegrationTest {
 
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
             consumer.subscribe(List.of(dltTopic));
-            List<String> keys = new ArrayList<>();
+            Map<String, byte[]> messages = new LinkedHashMap<>();
             await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
                 ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(500));
-                records.forEach(dltRecord -> keys.add(dltRecord.key()));
-                assertThat(keys).isNotEmpty();
+                records.forEach(dltRecord -> messages.put(dltRecord.key(), dltRecord.value()));
+                assertThat(messages).isNotEmpty();
             });
-            return keys;
+            return messages;
         }
     }
 }

@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaOperations;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
@@ -18,6 +19,7 @@ import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -109,10 +111,21 @@ public class KafkaConfig {
     public DefaultErrorHandler kafkaErrorHandler(KafkaTemplate<String, Object> kafkaTemplate,
                                                  KafkaTemplate<String, byte[]> byteArrayKafkaTemplate,
                                                  AppProperties properties) {
+        /*
+         * Именно LinkedHashMap, и порядок здесь — не оформление.
+         * Получатель перебирает ключи и берёт первый, которому подходит
+         * значение, а Object.class подходит вообще всему, включая byte[].
+         * Попади он в начало обхода — сырые байты неразобранного сообщения
+         * ушли бы через JSON-сериализатор и осели в DLT строкой base64
+         * вместо исходного тела. С Map.of порядок обхода не определён,
+         * поэтому поведение менялось от запуска к запуску.
+         */
+        Map<Class<?>, KafkaOperations<?, ?>> templates = new LinkedHashMap<>();
+        templates.put(byte[].class, byteArrayKafkaTemplate);
+        templates.put(Object.class, kafkaTemplate);
+
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
-                Map.of(
-                        byte[].class, byteArrayKafkaTemplate,
-                        Object.class, kafkaTemplate),
+                templates,
                 // Имя топика берётся из конфигурации, а не собирается по умолчанию
                 // добавлением суффикса .DLT — так оно задано в одном месте
                 (failed, exception) -> {
