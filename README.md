@@ -1,48 +1,48 @@
 # Async Task Handler
 
-Сервис распределённого асинхронного выполнения задач: задачи поступают из Kafka,
-сохраняются в PostgreSQL и выполняются пулом воркеров. Несколько экземпляров
-сервиса работают с общей базой и делят очередь между собой без повторной обработки.
+A distributed asynchronous task execution service: tasks arrive from Kafka, are
+stored in PostgreSQL and executed by a worker pool. Multiple instances share one
+database and split the queue between themselves without processing anything twice.
 
-## Как это работает
+## How it works
 
-Схема потока данных: [`docs/data-flow.drawio`](docs/data-flow.drawio) —
-открывается в [diagrams.net](https://app.diagrams.net) или плагином draw.io
-для VS Code / IntelliJ IDEA.
+Data flow diagram: [`docs/data-flow.drawio`](docs/data-flow.drawio) — opens in
+[diagrams.net](https://app.diagrams.net) or with the draw.io plugin for
+VS Code / IntelliJ IDEA.
 
 ```
-POST /api/tasks ──┐
-                  ├──► топик Kafka ──► консьюмер ──► БД (NEW)
-внешний продюсер ─┘         │            (дедупликация)  │
-                            │                            ▼
-                     не разобрано /         планировщик: FOR UPDATE SKIP LOCKED
-                     не прошло валидацию                 │
-                            │                            ▼
-                            ▼              пул воркеров ──► IN_PROGRESS
-                       топик tasks.DLT                   │  progress 0..100
-                                                         ▼
-                                              COMPLETED | FAILED
-                                                         │
-                                      GET /api/tasks/{id} ◄┘
+POST /api/tasks ───┐
+                   ├──► Kafka topic ──► consumer ──► DB (NEW)
+external producer ─┘         │        (deduplication)  │
+                             │                         ▼
+                     unparseable /       scheduler: FOR UPDATE SKIP LOCKED
+                     failed validation                 │
+                             │                         ▼
+                             ▼            worker pool ──► IN_PROGRESS
+                     topic tasks.DLT                   │  progress 0..100
+                                                       ▼
+                                            COMPLETED | FAILED
+                                                       │
+                                    GET /api/tasks/{id} ◄┘
 
-           зависло в IN_PROGRESS ──► восстановление ──► NEW либо FAILED
+          stuck in IN_PROGRESS ──► recovery ──► NEW or FAILED
 ```
 
-1. Задача попадает в топик — либо через `POST /api/tasks`, либо от любого
-   внешнего продюсера. Контроллер в БД не пишет, поэтому путь у задачи один
-   независимо от источника.
-2. Консьюмер валидирует сообщение, отсеивает повторную доставку и сохраняет
-   задачу со статусом `NEW`. Неисправимые сообщения уходят в `tasks.DLT`.
-3. Планировщик раз в `poll-interval-ms` забирает столько задач, сколько
-   свободно потоков в пуле, и переводит их в `IN_PROGRESS`.
-4. Воркер имитирует работу, периодически сохраняя прогресс, и завершает
-   задачу статусом `COMPLETED` или `FAILED`.
-5. Отдельная проверка возвращает в строй задачи, зависшие после падения инстанса.
-6. Состояние в любой момент доступно по `GET /api/tasks/{id}`.
+1. A task reaches the topic either through `POST /api/tasks` or from any external
+   producer. The controller never writes to the database, so a task follows the
+   same path regardless of where it came from.
+2. The consumer validates the message, discards redelivered duplicates and stores
+   the task with status `NEW`. Unrecoverable messages go to `tasks.DLT`.
+3. Every `poll-interval-ms` the scheduler claims as many tasks as there are free
+   threads in the pool and moves them to `IN_PROGRESS`.
+4. A worker simulates the work, saving progress along the way, and finishes the
+   task as `COMPLETED` or `FAILED`.
+5. A separate check brings back tasks left stranded by a crashed instance.
+6. The current state is available at any moment via `GET /api/tasks/{id}`.
 
-### Захват задач
+### Claiming tasks
 
-Ключевой запрос — в `TaskRepository.lockNewTasks`:
+The central query lives in `TaskRepository.lockNewTasks`:
 
 ```sql
 SELECT * FROM tasks
@@ -52,112 +52,116 @@ LIMIT :limit
 FOR UPDATE SKIP LOCKED
 ```
 
-`SKIP LOCKED` заставляет PostgreSQL пропускать строки, уже заблокированные
-другой транзакцией, вместо ожидания на них. Параллельные воркеры — в том числе
-в разных инстансах — получают непересекающиеся наборы задач без конфликтов
-и без повторных попыток. Транзакция захвата держится единицы миллисекунд:
-выполнение задачи вынесено за её пределы и блокировок БД не удерживает.
+`SKIP LOCKED` makes PostgreSQL skip rows already locked by another transaction
+instead of waiting on them. Concurrent workers — including those in different
+instances — receive disjoint sets of tasks with no conflicts and no retries. The
+claiming transaction lasts a few milliseconds: execution happens outside it and
+holds no database locks.
 
-Дополнительно у сущности есть `@Version`: он страхует путь обновления статуса,
-где задачу теоретически может тронуть кто-то ещё.
+The entity also carries `@Version`, which guards the status-update path where
+another party could in principle touch the same task.
 
-## Надёжность
+## Reliability
 
-### Зависшие задачи
+### Stuck tasks
 
-Инстанс может упасть, успев перевести задачу в `IN_PROGRESS`, но не успев
-дописать финальный статус. Выполнять её больше некому, а планировщик отбирает
-только задачи в статусе `NEW` — без отдельной проверки строка осталась бы
-в `IN_PROGRESS` навсегда.
+An instance can crash after moving a task to `IN_PROGRESS` but before writing the
+final status. Nobody is executing that task any more, and the scheduler only picks
+up tasks in status `NEW` — without a dedicated check the row would stay
+`IN_PROGRESS` forever.
 
-`StuckTaskRecoveryService` ищет задачи со слишком давним `started_at`. Если
-попытки не исчерпаны, задача возвращается в `NEW` с инкрементом `retry_count`
-и очисткой следов прошлой попытки; иначе признаётся провалившейся.
+`StuckTaskRecoveryService` looks for tasks whose `started_at` is too old. If the
+retry budget is not exhausted, the task goes back to `NEW` with `retry_count`
+incremented and traces of the previous attempt cleared; otherwise it is marked
+as failed.
 
-**`stuck-timeout-ms` обязан превышать максимально допустимую длительность
-задачи** (600 000 мс). Иначе восстановление отберёт задачу у живого воркера,
-который её честно выполняет, и она будет выполнена дважды.
+**`stuck-timeout-ms` must exceed the maximum allowed task duration** (600,000 ms).
+Otherwise recovery will take a task away from a live worker that is legitimately
+executing it, and the task will run twice.
 
-### Идемпотентность
+### Idempotency
 
-Kafka гарантирует доставку «хотя бы один раз»: после сбоя консьюмера или
-перебалансировки группы сообщение придёт повторно. Ключ сообщения сохраняется
-в `dedup_key`, и повторная доставка отбрасывается.
+Kafka guarantees at-least-once delivery: after a consumer failure or a group
+rebalance a message will arrive again. The message key is stored in `dedup_key`,
+and redelivered messages are dropped.
 
-Защита двухуровневая: проверка перед вставкой отсекает очевидные повторы,
-а уникальное ограничение в БД закрывает гонку, когда два инстанса проверили
-одновременно и оба увидели, что задачи ещё нет. Между проверкой и вставкой
-всегда есть окно, поэтому одной проверки недостаточно.
+The protection has two layers: a check before the insert filters out obvious
+duplicates, and a unique constraint in the database closes the race where two
+instances check simultaneously and both see that the task does not exist yet.
+There is always a window between the check and the insert, so the check alone
+is not enough.
 
-Сообщение без ключа дедуплицировать не по чему — такая задача сохраняется как есть.
+A message without a key has nothing to deduplicate on — such a task is stored
+as is.
 
-### Неисправимые сообщения
+### Unrecoverable messages
 
-Сообщение, которое не прошло валидацию или не разобралось вовсе, отправляется
-в `tasks.DLT` и снимается с очереди. Повторять доставку такого сообщения
-бессмысленно — тело от повторов не изменится, — а оставаться в голове партиции
-оно не должно, иначе заблокирует всё, что за ним.
+A message that fails validation, or does not parse at all, is published to
+`tasks.DLT` and removed from the queue. Redelivering it is pointless — the body
+will not change on retry — and it must not stay at the head of the partition,
+which would block everything behind it.
 
-Временные сбои (например, недоступная БД) наоборот повторяются дважды
-с паузой в секунду и только затем уходят в DLT.
+Transient failures (an unavailable database, for instance) are retried twice with
+a one-second pause and only then sent to the DLT.
 
-## Стек
+## Stack
 
-| Компонент | Версия |
+| Component | Version |
 |---|---|
 | Spring Boot | 4.1.1 (Framework 7.0.9) |
 | Java | 21 |
 | PostgreSQL | 17 |
-| Apache Kafka | 4.2.1, KRaft (без ZooKeeper) |
+| Apache Kafka | 4.2.1, KRaft (no ZooKeeper) |
 | Liquibase | 5.0.3 |
 | MapStruct | 1.6.3 |
 | springdoc-openapi | 3.1.1 |
 | Testcontainers | 2.0.5 |
 
-## Запуск
+## Running
 
 ```bash
 docker compose up -d --build
 ```
 
-Поднимутся PostgreSQL, Kafka, kafka-ui и сам сервис. Готовность:
+This brings up PostgreSQL, Kafka, kafka-ui and the service itself. Check
+readiness with:
 
 ```bash
 docker compose ps
 ```
 
-| Сервис | Адрес |
+| Service | Address |
 |---|---|
 | REST API | http://localhost:8080/api/tasks |
 | Swagger UI | http://localhost:8080/swagger-ui.html |
 | OpenAPI | http://localhost:8080/v3/api-docs |
 | Health | http://localhost:8080/actuator/health |
-| Метрики | http://localhost:8080/actuator/prometheus |
+| Metrics | http://localhost:8080/actuator/prometheus |
 | kafka-ui | http://localhost:8090 |
 
-### Несколько инстансов
+### Multiple instances
 
 ```bash
 docker compose up -d --build --scale app=3
 ```
 
-Инстансы получают порты из диапазона `8080-8085`. Конкретные номера **зависят
-от того, что свободно** — при пересоздании работающих контейнеров Docker берёт
-следующие свободные порты диапазона, и после перезапуска сервис может оказаться
-на 8083 вместо 8080. Актуальные адреса всегда показывает `docker compose ps`.
+Instances take ports from the `8080-8085` range. The exact numbers **depend on
+what is free**: when recreating running containers Docker picks the next
+available ports in the range, so after a restart the service may end up on 8083
+instead of 8080. `docker compose ps` always shows the current addresses.
 
-Проверить, как инстансы поделили очередь:
+To see how the instances split the queue:
 
 ```sql
 SELECT worker_id, count(*) FROM tasks GROUP BY worker_id;
 ```
 
-Столбец `worker_id` заполняется при захвате, поэтому по нему видно,
-какой именно экземпляр выполнил каждую задачу.
+`worker_id` is filled in at claim time, so it shows which instance executed
+each task.
 
 ## API
 
-### Поставить задачу
+### Submit a task
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks \
@@ -169,10 +173,11 @@ curl -X POST http://localhost:8080/api/tasks \
 { "message": "Задача принята в обработку", "correlationKey": "3f2b9c1e-..." }
 ```
 
-Ответ `202`, а не `201`: сообщение только положено в Kafka, записи в БД
-на этот момент ещё нет — поэтому в ответе нет и идентификатора задачи.
+The response is `202` rather than `201`: the message has only been placed in
+Kafka, there is no database row yet — which is also why the response carries no
+task id.
 
-### Узнать состояние
+### Check the state
 
 ```bash
 curl http://localhost:8080/api/tasks/1
@@ -194,108 +199,111 @@ curl http://localhost:8080/api/tasks/1
 }
 ```
 
-### Коды ответов
+### Response codes
 
-| Код | Когда |
+| Code | When |
 |---|---|
-| 200 | Задача найдена |
-| 202 | Задача принята в обработку |
-| 400 | Ошибка валидации, нечисловой или неположительный идентификатор, нечитаемое тело |
-| 404 | Задача не найдена |
-| 500 | Непредвиденная ошибка |
+| 200 | Task found |
+| 202 | Task accepted for processing |
+| 400 | Validation error, non-numeric or non-positive id, unreadable body |
+| 404 | Task not found |
+| 500 | Unexpected error |
 
-Тело ошибки одинаково для всех кодов: `timestamp`, `status`, `error`,
-`message`, `path` и `violations` — последнее только для ошибок валидации.
+The error body has the same shape for every code: `timestamp`, `status`,
+`error`, `message`, `path` and `violations` — the last one only for validation
+errors.
 
-### Отправка напрямую в Kafka
+### Publishing straight to Kafka
 
-Через kafka-ui (http://localhost:8090) в топик `tasks`:
+Through kafka-ui (http://localhost:8090) into the `tasks` topic:
 
 ```json
 { "name": "from-kafka", "durationMs": 3000 }
 ```
 
-Заголовки типа не требуются: консьюмер настроен на фиксированный тип
-сообщения, поэтому JSON, набранный руками, читается наравне с отправленным
-через `POST /api/tasks`. Ключ сообщения используется для дедупликации.
+No type headers are needed: the consumer is configured with a fixed message
+type, so hand-written JSON is read exactly like messages sent through
+`POST /api/tasks`. The message key is used for deduplication.
 
-## Метрики
+## Metrics
 
-`/actuator/prometheus` отдаёт помимо стандартных:
+Beyond the standard ones, `/actuator/prometheus` exposes:
 
-| Метрика | Смысл |
+| Metric | Meaning |
 |---|---|
-| `tasks_registered_total` | Принято задач из Kafka |
-| `tasks_duplicates_skipped_total` | Отброшено повторных доставок |
-| `tasks_claimed_total` | Захвачено воркерами этого инстанса |
-| `tasks_execution_seconds` | Длительность выполнения, с процентилями |
-| `tasks_failed_total` | Завершено ошибкой |
-| `tasks_recovered_total` | Зависших задач возвращено в очередь |
-| `tasks_retries_exhausted_total` | Признано провалившимися после всех попыток |
-| `tasks_queue_depth` | Задач ожидает выполнения |
-| `worker_pool_busy` / `worker_pool_size` | Занятость пула |
+| `tasks_registered_total` | Tasks accepted from Kafka |
+| `tasks_duplicates_skipped_total` | Redeliveries discarded |
+| `tasks_claimed_total` | Claimed by this instance's workers |
+| `tasks_execution_seconds` | Execution duration, with percentiles |
+| `tasks_failed_total` | Finished with an error |
+| `tasks_recovered_total` | Stuck tasks returned to the queue |
+| `tasks_retries_exhausted_total` | Given up on after all retries |
+| `tasks_queue_depth` | Tasks waiting to be executed |
+| `worker_pool_busy` / `worker_pool_size` | Pool occupancy |
 
-Счётчики локальны для инстанса, `tasks_queue_depth` читается из общей БД
-в момент опроса. Метрики разных инстансов различаются по тегу `application`.
+Counters are local to an instance; `tasks_queue_depth` is read from the shared
+database at scrape time. Metrics from different instances are distinguished by
+the `application` tag.
 
-## Конфигурация
+## Configuration
 
-| Параметр | По умолчанию | Назначение |
+| Property | Default | Purpose |
 |---|---|---|
-| `app.worker.pool-size` | 8 | Количество воркеров |
-| `app.worker.poll-interval-ms` | 1000 | Период опроса очереди |
-| `app.worker.progress-update-interval-ms` | 500 | Как часто сохраняется прогресс |
-| `app.worker.enabled` | true | Участвует ли инстанс в выполнении задач |
-| `app.recovery.enabled` | true | Включено ли восстановление зависших |
-| `app.recovery.stuck-timeout-ms` | 900000 | Порог зависания; строго больше 600000 |
-| `app.recovery.interval-ms` | 30000 | Период проверки зависших |
-| `app.recovery.max-retries` | 3 | Возвратов в очередь до признания провала |
-| `app.recovery.batch-size` | 50 | Размер пачки за проход |
-| `app.kafka.topic` | tasks | Топик с задачами |
-| `app.kafka.dlt-topic` | tasks.DLT | Топик неисправимых сообщений |
-| `app.kafka.partitions` | 3 | Партиций не меньше, чем инстансов |
-| `spring.datasource.hikari.maximum-pool-size` | 12 | Соединений с БД |
+| `app.worker.pool-size` | 8 | Number of workers |
+| `app.worker.poll-interval-ms` | 1000 | Queue polling interval |
+| `app.worker.progress-update-interval-ms` | 500 | How often progress is saved |
+| `app.worker.enabled` | true | Whether this instance executes tasks |
+| `app.recovery.enabled` | true | Whether stuck-task recovery runs |
+| `app.recovery.stuck-timeout-ms` | 900000 | Stuck threshold; strictly above 600000 |
+| `app.recovery.interval-ms` | 30000 | How often stuck tasks are checked |
+| `app.recovery.max-retries` | 3 | Requeues before giving up |
+| `app.recovery.batch-size` | 50 | Batch size per pass |
+| `app.kafka.topic` | tasks | Topic carrying tasks |
+| `app.kafka.dlt-topic` | tasks.DLT | Topic for unrecoverable messages |
+| `app.kafka.partitions` | 3 | At least as many partitions as instances |
+| `spring.datasource.hikari.maximum-pool-size` | 12 | Database connections |
 
-Размер пула соединений держится выше числа воркеров: соединение нужно и им
-(на короткие обновления статуса), и планировщику, и REST-слою.
+The connection pool is kept larger than the worker count: connections are needed
+by the workers (for short status updates), by the scheduler and by the REST layer.
 
-## Разработка
+## Development
 
-Инфраструктура в контейнерах, приложение — с хоста:
+Infrastructure in containers, application on the host:
 
 ```bash
 docker compose up -d postgres kafka kafka-ui
 ./mvnw spring-boot:run
 ```
 
-Приложение обращается к Kafka по `localhost:29092`. У брокера два клиентских
-листенера: `kafka:9092` для контейнеров и `localhost:29092` для процессов
-на хосте — без второго приложение вне Docker получило бы из метаданных
-брокера неразрешимое имя `kafka`.
+The application reaches Kafka at `localhost:29092`. The broker exposes two client
+listeners: `kafka:9092` for containers and `localhost:29092` for host processes —
+without the second one an application running outside Docker would receive the
+unresolvable hostname `kafka` from the broker metadata.
 
-### Миграции
+### Migrations
 
-Liquibase, XML-changelog'и в `src/main/resources/db/changelog`. Hibernate
-работает с `ddl-auto: validate` и схему не меняет. CHECK-ограничения
-и частичные индексы вынесены в `.sql` и подключены через `<sqlFile>`:
-тегами Liquibase они не выражаются.
+Liquibase, with XML changelogs under `src/main/resources/db/changelog`. Hibernate
+runs with `ddl-auto: validate` and never modifies the schema. CHECK constraints
+and partial indexes live in `.sql` files included via `<sqlFile>`: Liquibase tags
+cannot express them.
 
-### Тесты
+### Tests
 
 ```bash
 ./mvnw test
 ```
 
-Нужен запущенный Docker: интеграционные тесты поднимают PostgreSQL и Kafka
-через Testcontainers, отдельно от `docker compose`. H2 здесь не подошёл бы —
-`SKIP LOCKED`, частичные индексы и CHECK-ограничения на нём не воспроизводятся.
+Docker must be running: the integration tests start their own PostgreSQL and
+Kafka through Testcontainers, separate from `docker compose`. H2 would not work
+here — `SKIP LOCKED`, partial indexes and CHECK constraints do not reproduce on it.
 
-Покрыто: конкурентный захват задач, приём и валидация сообщений из Kafka,
-дедупликация повторной доставки, отправка неисправимых сообщений в DLT,
-асинхронное выполнение с промежуточным прогрессом, параллельность пула,
-восстановление зависших задач, контракт REST и коды ошибок.
+Covered: concurrent task claiming, Kafka message intake and validation,
+deduplication of redeliveries, routing of unrecoverable messages to the DLT,
+asynchronous execution with intermediate progress, pool parallelism, stuck-task
+recovery, the REST contract and its error codes.
 
-## Что осталось за рамками
+## Out of scope
 
-Из production-ready раздела ТЗ не реализовано: аутентификация и авторизация
-(Spring Security), кэширование в Redis, конфигурация CI/CD.
+Not implemented from the production-readiness section of the assignment:
+authentication and authorization (Spring Security), Redis caching, CI/CD
+configuration.
