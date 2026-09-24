@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -31,6 +32,12 @@ public class TaskController implements TaskApi {
     @GetMapping("/{id}")
     public TaskResponseDto getTask(@PathVariable Long id) {
         return taskQueryService.findById(id);
+    }
+
+    @Override
+    @GetMapping
+    public TaskResponseDto getTaskByCorrelationKey(@RequestParam String correlationKey) {
+        return taskQueryService.findByCorrelationKey(correlationKey);
     }
 
     @Override

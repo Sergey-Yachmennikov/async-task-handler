@@ -9,5 +9,6 @@
     <include file="db/changelog/changes/001-create-tasks-table.xml"/>
     <include file="db/changelog/changes/002-tasks-constraints-and-indexes.xml"/>
     <include file="db/changelog/changes/003-recovery-and-idempotency.xml"/>
+    <include file="db/changelog/changes/004-claim-token-and-heartbeat.xml"/>
 
 </databaseChangeLog>

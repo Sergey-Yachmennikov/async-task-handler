@@ -74,6 +74,21 @@ public class Task {
     private String dedupKey;
 
     /**
+     * Токен конкретной попытки выполнения, выдаётся заново при каждом захвате.
+     * <p>
+     * В отличие от {@code workerId} (это идентификатор инстанса, а не попытки)
+     * отличает и повторный захват той же задачи тем же инстансом: у зависшего
+     * воркера токен остаётся старым, у новой попытки — свежий, поэтому очнувшийся
+     * воркер не может затереть результат уже выполняющейся параллельно попытки.
+     */
+    @Column(name = "claim_token", length = 36)
+    private String claimToken;
+
+    /** Отметка последней активности воркера; по ней ищутся зависшие задачи. */
+    @Column(name = "heartbeat_at")
+    private Instant heartbeatAt;
+
+    /**
      * Оптимистичная блокировка. Захват задачи защищён на уровне БД через
      * SKIP LOCKED, а версия страхует путь обновления статуса: если задачу
      * параллельно тронул кто-то ещё, коммит упадёт вместо тихой перезаписи.
@@ -96,6 +111,45 @@ public class Task {
         this.name = name;
         this.durationMs = durationMs;
         this.status = TaskStatus.NEW;
+    }
+
+    /** Захват воркером: NEW → IN_PROGRESS с выдачей нового токена попытки. */
+    public void claim(String workerId, String claimToken, Instant now) {
+        this.status = TaskStatus.IN_PROGRESS;
+        this.workerId = workerId;
+        this.claimToken = claimToken;
+        this.startedAt = now;
+        this.heartbeatAt = now;
+    }
+
+    /** Возврат в очередь без изменения счётчика попыток — нераспределённая задача. */
+    public void release() {
+        this.status = TaskStatus.NEW;
+        this.workerId = null;
+        this.claimToken = null;
+        this.startedAt = null;
+        this.heartbeatAt = null;
+    }
+
+    /** Возврат в очередь зависшей задачи: попытка засчитана, прогресс сброшен. */
+    public void requeueAfterStuckRecovery() {
+        this.retryCount++;
+        this.progress = 0;
+        release();
+    }
+
+    /** Финальный провал — как по итогам исполнения, так и по исчерпанию попыток восстановления. */
+    public void fail(String errorMessage, Instant now) {
+        this.status = TaskStatus.FAILED;
+        this.errorMessage = errorMessage;
+        this.finishedAt = now;
+    }
+
+    /** Задача считается своей только если она ещё выполняется и токен совпадает с текущей попыткой. */
+    public boolean isOwnedInProgressBy(String claimToken) {
+        return status == TaskStatus.IN_PROGRESS
+                && claimToken != null
+                && claimToken.equals(this.claimToken);
     }
 
     /*

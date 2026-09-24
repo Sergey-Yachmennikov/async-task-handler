@@ -11,8 +11,8 @@ spring:
     password: ${DB_PASSWORD:taskpass}
     hikari:
       pool-name: TaskServicePool
-      # Пул должен быть больше worker.pool-size: воркеры берут соединение
-      # на сохранение прогресса, плюс отдельные соединения нужны шедулеру и REST
+      # Пул должен быть больше worker.pool-size (соединения нужны ещё шедулеру
+      # и REST-слою) — связь проверяется на старте в HikariPoolSizeValidator
       maximum-pool-size: 12
       minimum-idle: 4
       connection-timeout: 20000
@@ -67,11 +67,16 @@ app:
     # Партиций не меньше, чем планируемых инстансов сервиса: в одной
     # consumer group партиция достаётся ровно одному консьюмеру
     partitions: 3
+    # Пауза перед повторной обработкой сообщения после временного сбоя
+    retry-interval-ms: 1000
+    retry-max-attempts: 2
   recovery:
     enabled: true
-    # Строго больше максимально допустимой длительности задачи (600000 мс),
-    # иначе восстановление отберёт задачу у работающего над ней воркера
-    stuck-timeout-ms: 900000
+    # Задача считается зависшей, если heartbeat_at не обновлялся дольше этого
+    # порога. Воркер обновляет отметку вместе с каждым сохранением прогресса
+    # (раз в progress-update-interval-ms), поэтому порог может быть коротким
+    # и не привязан к максимально допустимой длительности задачи
+    stuck-timeout-ms: 30000
     interval-ms: 30000
     max-retries: 3
     batch-size: 50
@@ -83,6 +88,8 @@ app:
     pool-size: 8
     poll-interval-ms: 1000
     progress-update-interval-ms: 500
+    # Сколько ждать доработки текущих задач при остановке сервиса
+    shutdown-timeout-ms: 30000
 
 springdoc:
   swagger-ui:
@@ -95,7 +102,9 @@ management:
         include: health,info,metrics,prometheus
   endpoint:
     health:
-      show-details: always
+      # Подробности эндпоинта видны только авторизованным; полное раскрытие
+      # всем — в dev-профиле, для прод-деплоя это лишняя утечка деталей
+      show-details: when-authorized
   metrics:
     tags:
       # Метрики от нескольких инстансов различаются по этому тегу
@@ -103,4 +112,4 @@ management:
 
 logging:
   level:
-    com.erevan.async_task_handler: DEBUG
+    com.erevan.async_task_handler: INFO

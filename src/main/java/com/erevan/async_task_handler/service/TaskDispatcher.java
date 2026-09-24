@@ -68,7 +68,7 @@ public class TaskDispatcher {
             List<ClaimedTask> stranded = claimed.subList(dispatched, claimed.size());
             log.error("Раздача задач прервана после {} из {}, возвращаем остаток в очередь",
                     dispatched, claimed.size(), e);
-            claimService.releaseClaim(stranded.stream().map(ClaimedTask::id).toList());
+            claimService.releaseClaim(stranded);
         }
     }
 }

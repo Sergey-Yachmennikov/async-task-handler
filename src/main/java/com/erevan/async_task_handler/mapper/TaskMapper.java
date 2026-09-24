@@ -44,6 +44,8 @@ public interface TaskMapper {
     @Mapping(target = "workerId", ignore = true)
     @Mapping(target = "retryCount", ignore = true)
     @Mapping(target = "dedupKey", ignore = true)
+    @Mapping(target = "claimToken", ignore = true)
+    @Mapping(target = "heartbeatAt", ignore = true)
     @Mapping(target = "startedAt", ignore = true)
     @Mapping(target = "finishedAt", ignore = true)
     Task toEntity(TaskRequestDto request);

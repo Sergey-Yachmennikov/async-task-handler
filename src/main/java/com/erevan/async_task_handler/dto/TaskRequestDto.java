@@ -22,8 +22,6 @@ public record TaskRequestDto(
         @Size(max = 255, message = "Название не длиннее {max} символов")
         String name,
 
-        // Верхняя граница общая с настройкой восстановления зависших задач,
-        // поэтому вынесена в константу — см. TaskConstraints
         @Schema(description = "Длительность выполнения в миллисекундах", example = "5000")
         @NotNull(message = "Длительность обязательна")
         @Positive(message = "Длительность должна быть положительной")

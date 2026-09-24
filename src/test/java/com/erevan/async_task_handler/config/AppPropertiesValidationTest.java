@@ -1,6 +1,5 @@
 package com.erevan.async_task_handler.config;
 
-import com.erevan.async_task_handler.domain.TaskConstraints;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
@@ -39,23 +38,7 @@ class AppPropertiesValidationTest {
     @Test
     @DisplayName("Конфигурация по умолчанию из application.yaml проходит проверку")
     void defaultConfigurationIsValid() {
-        assertThat(validator.validate(properties(900_000, 8))).isEmpty();
-    }
-
-    @Test
-    @DisplayName("Порог зависания ниже предельной длительности задачи отклоняется")
-    void thresholdBelowMaxTaskDurationIsRejected() {
-        assertThat(validator.validate(properties(60_000, 8)))
-                .singleElement()
-                .satisfies(violation -> assertThat(violation.getMessage())
-                        .contains("stuck-timeout-ms"));
-    }
-
-    @Test
-    @DisplayName("Порог, равный предельной длительности, тоже отклоняется")
-    void thresholdEqualToMaxTaskDurationIsRejected() {
-        // На самой границе задача ещё может выполняться, поэтому нужно строгое превышение
-        assertThat(validator.validate(properties(TaskConstraints.MAX_DURATION_MS, 8))).hasSize(1);
+        assertThat(validator.validate(properties(30_000, 8))).isEmpty();
     }
 
     @Test
@@ -66,7 +49,7 @@ class AppPropertiesValidationTest {
          * поднимался бы полностью работоспособным на вид: консьюмер читает
          * Kafka, задачи копятся в статусе NEW, и ни одна из них не выполняется.
          */
-        assertThat(validator.validate(properties(900_000, 0)))
+        assertThat(validator.validate(properties(30_000, 0)))
                 .singleElement()
                 .satisfies(violation -> assertThat(violation.getPropertyPath())
                         .hasToString("worker.poolSize"));
@@ -76,9 +59,9 @@ class AppPropertiesValidationTest {
     @DisplayName("Пустое имя топика отклоняется")
     void blankTopicIsRejected() {
         AppProperties withBlankTopic = new AppProperties(
-                new AppProperties.Kafka("", "tasks.DLT", 3),
-                new AppProperties.Worker(true, 8, 1_000, 500),
-                new AppProperties.Recovery(true, 900_000, 30_000, 3, 50));
+                new AppProperties.Kafka("", "tasks.DLT", 3, 1_000, 2),
+                new AppProperties.Worker(true, 8, 1_000, 500, 30_000),
+                new AppProperties.Recovery(true, 30_000, 30_000, 3, 50));
 
         assertThat(validator.validate(withBlankTopic))
                 .singleElement()
@@ -88,8 +71,8 @@ class AppPropertiesValidationTest {
 
     private AppProperties properties(long stuckTimeoutMs, int poolSize) {
         return new AppProperties(
-                new AppProperties.Kafka("tasks", "tasks.DLT", 3),
-                new AppProperties.Worker(true, poolSize, 1_000, 500),
+                new AppProperties.Kafka("tasks", "tasks.DLT", 3, 1_000, 2),
+                new AppProperties.Worker(true, poolSize, 1_000, 500, 30_000),
                 new AppProperties.Recovery(true, stuckTimeoutMs, 30_000, 3, 50));
     }
 }

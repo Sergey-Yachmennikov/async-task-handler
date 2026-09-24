@@ -2,7 +2,6 @@ package com.erevan.async_task_handler.service;
 
 import com.erevan.async_task_handler.config.AppProperties;
 import com.erevan.async_task_handler.domain.Task;
-import com.erevan.async_task_handler.domain.TaskStatus;
 import com.erevan.async_task_handler.metrics.TaskMetrics;
 import com.erevan.async_task_handler.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
@@ -24,10 +23,10 @@ import java.util.List;
  * задачи в статусе NEW. Без такой проверки строка осталась бы в IN_PROGRESS
  * навсегда.
  * <p>
- * Признак зависания — слишком давний {@code started_at}. Порог обязан
- * превышать максимально допустимую длительность задачи, иначе восстановление
- * отберёт задачу у живого воркера, который её честно выполняет, и она будет
- * выполнена дважды.
+ * Признак зависания — слишком давний {@code heartbeat_at}, а не заказанная
+ * длительность задачи: воркер обновляет его вместе с каждым сохранением
+ * прогресса, поэтому порог не нужно подгонять под максимально возможную
+ * длительность и он может быть коротким.
  */
 @Slf4j
 @Service
@@ -66,23 +65,17 @@ public class StuckTaskRecoveryService {
     }
 
     private void returnToQueue(Task task) {
-        task.setRetryCount(task.getRetryCount() + 1);
-        task.setStatus(TaskStatus.NEW);
-        // Следы прошлой попытки стираются: иначе задача вернётся в очередь
-        // с чужим прогрессом и признаком уже не работающего инстанса
-        task.setProgress(0);
-        task.setWorkerId(null);
-        task.setStartedAt(null);
+        // requeueAfterStuckRecovery стирает и следы прошлой попытки (прогресс,
+        // владельца, токен): иначе задача вернулась бы в очередь с чужим
+        // прогрессом и признаком уже не работающего инстанса
+        task.requeueAfterStuckRecovery();
         log.info("Задача {} возвращена в очередь, попытка {}", task.getId(), task.getRetryCount());
         taskMetrics.recordRecovered();
     }
 
     private void giveUp(Task task, int maxRetries) {
-        task.setStatus(TaskStatus.FAILED);
-        task.setErrorMessage(
-                "Задача зависла в IN_PROGRESS и исчерпала попытки восстановления (%d)"
-                        .formatted(maxRetries));
-        task.setFinishedAt(Instant.now());
+        task.fail("Задача зависла в IN_PROGRESS и исчерпала попытки восстановления (%d)"
+                .formatted(maxRetries), Instant.now());
         log.error("Задача {} признана провалившейся после {} попыток", task.getId(), maxRetries);
         taskMetrics.recordExhausted();
     }

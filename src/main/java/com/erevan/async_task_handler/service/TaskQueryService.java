@@ -27,4 +27,20 @@ public class TaskQueryService {
                 .map(taskMapper::toResponse)
                 .orElseThrow(() -> new TaskNotFoundException(id));
     }
+
+    /**
+     * Поиск по ключу, полученному клиентом в ответ на POST /api/tasks.
+     * Так задачу можно найти, не зная её id — на момент постановки в Kafka
+     * его ещё не существует.
+     *
+     * @throws TaskNotFoundException если задачи с таким ключом нет — либо
+     *                                консьюмер ещё не обработал сообщение,
+     *                                либо ключ ошибочный
+     */
+    @Transactional(readOnly = true)
+    public TaskResponseDto findByCorrelationKey(String correlationKey) {
+        return taskRepository.findByDedupKey(correlationKey)
+                .map(taskMapper::toResponse)
+                .orElseThrow(() -> new TaskNotFoundException(correlationKey));
+    }
 }

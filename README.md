@@ -37,7 +37,9 @@ external producer ─┘         │        (deduplication)  │
    threads in the pool and moves them to `IN_PROGRESS`.
 4. A worker simulates the work, saving progress along the way, and finishes the
    task as `COMPLETED` or `FAILED`.
-5. A separate check brings back tasks left stranded by a crashed instance.
+5. A separate check brings back tasks left stranded by a crashed instance —
+   the same happens instantly, without waiting for that check, to a task caught
+   mid-execution by a graceful shutdown of the instance running it.
 6. The current state is available at any moment via `GET /api/tasks/{id}`.
 
 ### Claiming tasks
@@ -58,8 +60,10 @@ instances — receive disjoint sets of tasks with no conflicts and no retries. T
 claiming transaction lasts a few milliseconds: execution happens outside it and
 holds no database locks.
 
-The entity also carries `@Version`, which guards the status-update path where
-another party could in principle touch the same task.
+The entity also carries `@Version`, guarding the claim and recovery paths —
+both read the entity and write it back, so a concurrent touch there needs
+to be caught by optimistic locking. Progress, completion and failure writes
+work differently: see `claim_token` below.
 
 ## Reliability
 
@@ -70,14 +74,23 @@ final status. Nobody is executing that task any more, and the scheduler only pic
 up tasks in status `NEW` — without a dedicated check the row would stay
 `IN_PROGRESS` forever.
 
-`StuckTaskRecoveryService` looks for tasks whose `started_at` is too old. If the
-retry budget is not exhausted, the task goes back to `NEW` with `retry_count`
-incremented and traces of the previous attempt cleared; otherwise it is marked
-as failed.
+`StuckTaskRecoveryService` looks for tasks whose `heartbeat_at` is too old. The
+worker refreshes this timestamp every time it saves progress (every
+`progress-update-interval-ms`), so the threshold is independent of how long a task
+is allowed to run and can stay short (30 s by default). If the retry budget is not
+exhausted, the task goes back to `NEW` with `retry_count` incremented and traces
+of the previous attempt cleared (including the claim token, see below); otherwise
+it is marked as failed.
 
-**`stuck-timeout-ms` must exceed the maximum allowed task duration** (600,000 ms).
-Otherwise recovery will take a task away from a live worker that is legitimately
-executing it, and the task will run twice.
+Ownership on every status write — progress, completion, failure — is checked
+against `claim_token`, a fresh id issued on every claim, not against `worker_id`.
+An instance identifier alone cannot tell two attempts of the *same* instance
+apart: a worker can stall (GC pause, suspended VM), get requeued by recovery,
+and get re-claimed by the very same instance while the stalled thread is still
+alive. `claim_token` differs between the two attempts even then, so the stalled
+one can no longer overwrite the live one's result. The check itself is a single
+conditional `UPDATE ... WHERE status = 'IN_PROGRESS' AND claim_token = :token`,
+so there is no read-then-write race to guard with optimistic locking or retries.
 
 ### Idempotency
 
@@ -94,12 +107,24 @@ is not enough.
 A message without a key has nothing to deduplicate on — such a task is stored
 as is.
 
+The Kafka message key formally exists for partitioning, not uniqueness — an
+external producer is free to reuse it (a user id, a task type) for reasons that
+have nothing to do with deduplication, and every message but the first with that
+key would silently be dropped as a duplicate. Redelivery protection itself relies
+on the topic-partition-offset, not the key; `POST /api/tasks` always generates
+a fresh random key per request specifically so this collision cannot happen on
+that path. An external producer that wants deduplication should keep its
+business key out of the Kafka key and pass it in the message body or a header
+instead.
+
 ### Unrecoverable messages
 
 A message that fails validation, or does not parse at all, is published to
 `tasks.DLT` and removed from the queue. Redelivering it is pointless — the body
 will not change on retry — and it must not stay at the head of the partition,
-which would block everything behind it.
+which would block everything behind it. A message with an empty body (a Kafka
+tombstone, or hand-typed `null` in kafka-ui) is treated the same way, rather
+than tripping over `null` inside the validator.
 
 Transient failures (an unavailable database, for instance) are retried twice with
 a one-second pause and only then sent to the DLT.
@@ -161,9 +186,11 @@ Docker: the same image is configured entirely from the outside.
 running from the host without any environment set still works against the
 Compose infrastructure.
 
-The values committed here are development defaults. In a real deployment this
-file holds real credentials, belongs in `.gitignore`, and the secrets come from
-the orchestrator instead.
+The values committed here are development defaults, and `.env` is listed in
+`.gitignore` going forward — new environments should copy `.env.example` and
+fill in their own values (`cp .env.example .env`) rather than editing the
+committed file directly. In a real deployment this file holds real credentials
+and the secrets come from the orchestrator instead.
 
 ### Multiple instances
 
@@ -201,7 +228,21 @@ curl -X POST http://localhost:8080/api/tasks \
 
 The response is `202` rather than `201`: the message has only been placed in
 Kafka, there is no database row yet — which is also why the response carries no
-task id.
+task id. `send()` blocks until Kafka acknowledges the write (up to 5 s); if the
+broker never confirms it, the client gets `503` instead of a false `202` for
+a task that never made it into the topic.
+
+### Finding a task before you know its id
+
+The `correlationKey` from the `202` response is also the task's `dedup_key`.
+Before the id is known (or if it never gets used), the task can be found by that
+key instead:
+
+```bash
+curl "http://localhost:8080/api/tasks?correlationKey=3f2b9c1e-4a7d-4c3e-9f10-2b8e5d7a1c04"
+```
+
+Returns `404` until the consumer has processed the message and the row exists.
 
 ### Check the state
 
@@ -233,6 +274,7 @@ curl http://localhost:8080/api/tasks/1
 | 202 | Task accepted for processing |
 | 400 | Validation error, non-numeric or non-positive id, unreadable body |
 | 404 | Task not found |
+| 503 | Kafka did not acknowledge the write in time |
 | 500 | Unexpected error |
 
 The error body has the same shape for every code: `timestamp`, `status`,
@@ -277,20 +319,26 @@ the `application` tag.
 |---|---|---|
 | `app.worker.pool-size` | 8 | Number of workers |
 | `app.worker.poll-interval-ms` | 1000 | Queue polling interval |
-| `app.worker.progress-update-interval-ms` | 500 | How often progress is saved |
+| `app.worker.progress-update-interval-ms` | 500 | How often progress is saved (also refreshes `heartbeat_at`) |
+| `app.worker.shutdown-timeout-ms` | 30000 | How long to let in-flight tasks finish on shutdown before interrupting them |
 | `app.worker.enabled` | true | Whether this instance executes tasks |
 | `app.recovery.enabled` | true | Whether stuck-task recovery runs |
-| `app.recovery.stuck-timeout-ms` | 900000 | Stuck threshold; strictly above 600000 |
+| `app.recovery.stuck-timeout-ms` | 30000 | How long `heartbeat_at` may go stale before a task is considered stuck |
 | `app.recovery.interval-ms` | 30000 | How often stuck tasks are checked |
 | `app.recovery.max-retries` | 3 | Requeues before giving up |
 | `app.recovery.batch-size` | 50 | Batch size per pass |
 | `app.kafka.topic` | tasks | Topic carrying tasks |
 | `app.kafka.dlt-topic` | tasks.DLT | Topic for unrecoverable messages |
 | `app.kafka.partitions` | 3 | At least as many partitions as instances |
+| `app.kafka.retry-interval-ms` | 1000 | Pause before retrying a message after a transient consumer failure |
+| `app.kafka.retry-max-attempts` | 2 | Retries before a message goes to the DLT |
 | `spring.datasource.hikari.maximum-pool-size` | 12 | Database connections |
 
 The connection pool is kept larger than the worker count: connections are needed
 by the workers (for short status updates), by the scheduler and by the REST layer.
+`HikariPoolSizeValidator` fails fast on startup if the pool is not sized above
+`app.worker.pool-size`, so raising the worker count without raising the pool
+size is caught immediately instead of starving connections silently at runtime.
 
 ## Development
 
@@ -305,6 +353,17 @@ The application reaches Kafka at `localhost:29092`. The broker exposes two clien
 listeners: `kafka:9092` for containers and `localhost:29092` for host processes —
 without the second one an application running outside Docker would receive the
 unresolvable hostname `kafka` from the broker metadata.
+
+By default the app logs at `INFO` and the health endpoint hides its details from
+unauthenticated callers — safe defaults for the Docker image, which activates no
+profile (see above). For verbose local debugging, activate the `dev` profile
+instead of changing the shared defaults:
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+This switches app logging to `DEBUG` and always shows full health details.
 
 ### Migrations
 

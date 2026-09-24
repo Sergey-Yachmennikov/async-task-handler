@@ -1,8 +1,6 @@
 package com.erevan.async_task_handler.config;
 
-import com.erevan.async_task_handler.domain.TaskConstraints;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -13,14 +11,11 @@ import org.springframework.validation.annotation.Validated;
  * <p>
  * Типобезопасная привязка вместо россыпи {@code @Value}: неверное значение
  * ловится на старте приложения, а не в момент первого обращения к полю.
- */
-/*
- * @Valid на каждой вложенной записи обязателен и это не формальность.
- * @Validated включает проверку самого объекта, но Bean Validation не спускается
- * во вложенные объекты без явного указания каскада. Без этих аннотаций все
- * ограничения ниже — @Min, @NotBlank, @AssertTrue — остаются просто разметкой:
- * никакой ошибки при этом не выводится, конфигурация молча принимает
- * любые значения.
+ * <p>
+ * {@code @Valid} на каждой вложенной записи обязателен: {@code @Validated}
+ * включает проверку самого объекта, но Bean Validation не спускается во
+ * вложенные объекты без явного указания каскада. Без него {@code @Min},
+ * {@code @NotBlank} и т.п. ниже остаются просто разметкой.
  */
 @Validated
 @ConfigurationProperties("app")
@@ -39,13 +34,17 @@ public record AppProperties(@Valid Kafka kafka, @Valid Worker worker, @Valid Rec
             @NotBlank
             String dltTopic,
 
-            /*
-             * Партиций должно быть не меньше, чем инстансов сервиса: в одной
-             * consumer group партиция достаётся ровно одному консьюмеру,
-             * и лишние инстансы просто простаивали бы без работы.
-             */
+            /** Партиций не меньше, чем инстансов сервиса: лишние инстансы простаивали бы без работы. */
             @Min(1)
-            int partitions
+            int partitions,
+
+            /** Пауза перед повторной обработкой сообщения после временного сбоя (например, недоступной БД), мс. */
+            @Min(0)
+            long retryIntervalMs,
+
+            /** Сколько раз повторить обработку сообщения, прежде чем отправить его в DLT. */
+            @Min(0)
+            long retryMaxAttempts
     ) {
     }
 
@@ -68,7 +67,11 @@ public record AppProperties(@Valid Kafka kafka, @Valid Worker worker, @Valid Rec
 
             /** Как часто воркер сохраняет промежуточный прогресс, мс. */
             @Min(1)
-            long progressUpdateIntervalMs
+            long progressUpdateIntervalMs,
+
+            /** Сколько ждать доработки текущих задач при остановке сервиса, прежде чем прервать их принудительно, мс. */
+            @Min(1)
+            long shutdownTimeoutMs
     ) {
     }
 
@@ -78,12 +81,10 @@ public record AppProperties(@Valid Kafka kafka, @Valid Worker worker, @Valid Rec
             boolean enabled,
 
             /**
-             * Сколько задача может находиться в IN_PROGRESS, прежде чем будет
-             * признана зависшей.
-             * <p>
-             * Значение обязано превышать максимально допустимую длительность
-             * задачи. Иначе восстановление отберёт задачу у живого воркера,
-             * который её честно выполняет, и она будет выполнена дважды.
+             * Сколько задача может провести без обновления {@code heartbeat_at},
+             * прежде чем будет признана зависшей. Воркер обновляет отметку вместе
+             * с каждым сохранением прогресса, поэтому порог не завязан на
+             * максимально допустимую длительность задачи и может быть коротким.
              */
             @Min(1)
             long stuckTimeoutMs,
@@ -100,23 +101,5 @@ public record AppProperties(@Valid Kafka kafka, @Valid Worker worker, @Valid Rec
             @Min(1)
             int batchSize
     ) {
-
-        /**
-         * Порог зависания обязан превышать предельную длительность задачи.
-         * <p>
-         * Проверка межполевая, и она закрывает единственный способ незаметно
-         * испортить данные конфигурацией. Поставь порог меньше — и восстановление
-         * отберёт задачу у живого воркера, который её честно выполняет: она
-         * вернётся в очередь, её захватит другой инстанс, и задача выполнится
-         * дважды. Ни исключения, ни отказа при этом не будет.
-         * <p>
-         * Раньше это требование жило только в комментарии. Теперь неверное
-         * сочетание значений роняет приложение на старте.
-         */
-        @AssertTrue(message = "app.recovery.stuck-timeout-ms должен превышать "
-                + "максимальную длительность задачи (" + TaskConstraints.MAX_DURATION_MS + " мс)")
-        public boolean isStuckTimeoutAboveMaxTaskDuration() {
-            return stuckTimeoutMs > TaskConstraints.MAX_DURATION_MS;
-        }
     }
 }

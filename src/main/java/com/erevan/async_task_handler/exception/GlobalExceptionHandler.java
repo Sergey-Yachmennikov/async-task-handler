@@ -15,6 +15,9 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 
 import java.util.List;
 
+// org.springframework.web.ErrorResponse не импортируется явно: имя конфликтует
+// с ErrorResponse из dto этого пакета, ниже он используется полным именем
+
 /**
  * Единая обработка ошибок API, п.4 дополнительных требований ТЗ.
  * <p>
@@ -93,13 +96,35 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, "Тело запроса не удалось разобрать", request);
     }
 
+    /** Kafka не подтвердила запись сообщения: временная недоступность брокера, а не ошибка клиента. */
+    @ExceptionHandler(TaskPublishException.class)
+    public ResponseEntity<ErrorResponse> handleTaskPublishFailure(TaskPublishException e,
+                                                                   HttpServletRequest request) {
+        log.error("Не удалось опубликовать задачу в Kafka на {}", request.getRequestURI(), e);
+        return build(HttpStatus.SERVICE_UNAVAILABLE, "Сервис временно недоступен, повторите попытку позже", request);
+    }
+
     /**
-     * Всё непредусмотренное. Подробности исключения уходят в лог со стектрейсом,
-     * а наружу отдаётся общая формулировка: детали внутреннего устройства
-     * сервиса клиенту знать незачем.
+     * Всё непредусмотренное явными обработчиками выше.
+     * <p>
+     * {@code org.springframework.web.ErrorResponse} — интерфейс, а не подтип
+     * {@code Throwable}, поэтому в {@code @ExceptionHandler} его не указать —
+     * отсюда проверка через {@code instanceof}, а не отдельный метод. Его
+     * реализуют штатные исключения Spring MVC: 404 на неизвестном пути,
+     * 405 на неподдерживаемом методе, 415 на неподдерживаемом Content-Type
+     * и т.п. Без этой проверки они получали бы 500 вместо своего настоящего
+     * кода, да ещё с лишней записью в лог ошибок на штатной ситуации.
+     * Остальное — действительно непредвиденное: стектрейс в лог, наружу —
+     * общая формулировка без деталей внутреннего устройства сервиса.
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception e, HttpServletRequest request) {
+        if (e instanceof org.springframework.web.ErrorResponse errorResponse) {
+            HttpStatus status = HttpStatus.valueOf(errorResponse.getStatusCode().value());
+            log.warn("{} на {}: {}", status, request.getRequestURI(), e.getMessage());
+            String detail = errorResponse.getBody().getDetail();
+            return build(status, detail != null ? detail : status.getReasonPhrase(), request);
+        }
         log.error("Необработанная ошибка на {}", request.getRequestURI(), e);
         return build(HttpStatus.INTERNAL_SERVER_ERROR, "Внутренняя ошибка сервиса", request);
     }

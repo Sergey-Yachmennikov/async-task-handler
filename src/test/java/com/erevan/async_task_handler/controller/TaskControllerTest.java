@@ -4,6 +4,7 @@ import com.erevan.async_task_handler.domain.TaskStatus;
 import com.erevan.async_task_handler.dto.TaskRequestDto;
 import com.erevan.async_task_handler.dto.TaskResponseDto;
 import com.erevan.async_task_handler.exception.TaskNotFoundException;
+import com.erevan.async_task_handler.exception.TaskPublishException;
 import com.erevan.async_task_handler.kafka.TaskProducer;
 import com.erevan.async_task_handler.service.TaskQueryService;
 // Spring Boot 4 использует Jackson 3, у которого пакет tools.jackson.
@@ -92,6 +93,42 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.violations[0].field").value("id"))
                 .andExpect(jsonPath("$.violations[0].message")
                         .value("Идентификатор задачи должен быть положительным"));
+    }
+
+    @Test
+    @DisplayName("GET по correlationKey возвращает 200 и состояние задачи")
+    void getByCorrelationKeyReturnsOk() throws Exception {
+        given(taskQueryService.findByCorrelationKey("corr-key-1")).willReturn(new TaskResponseDto(
+                1L, "report", 5_000L, TaskStatus.NEW, 0,
+                null, null, null, Instant.now(), null, null));
+
+        mockMvc.perform(get("/api/tasks").param("correlationKey", "corr-key-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(1))
+                .andExpect(jsonPath("$.status").value("NEW"));
+    }
+
+    @Test
+    @DisplayName("GET по неизвестному correlationKey возвращает 404")
+    void getByUnknownCorrelationKeyReturnsNotFound() throws Exception {
+        given(taskQueryService.findByCorrelationKey("missing-key"))
+                .willThrow(new TaskNotFoundException("missing-key"));
+
+        mockMvc.perform(get("/api/tasks").param("correlationKey", "missing-key"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("POST, которому Kafka не подтвердила запись, возвращает 503")
+    void postWhenKafkaDoesNotAcknowledgeReturnsServiceUnavailable() throws Exception {
+        given(taskProducer.send(any(TaskRequestDto.class)))
+                .willThrow(new TaskPublishException("таймаут", new RuntimeException("brokers unavailable")));
+
+        mockMvc.perform(post("/api/tasks")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new TaskRequestDto("generate-report", 5_000L))))
+                .andExpect(status().isServiceUnavailable());
     }
 
     @Test

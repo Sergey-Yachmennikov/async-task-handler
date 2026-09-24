@@ -8,6 +8,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
  * Идентификатора задачи здесь нет намеренно: на этот момент сообщение только
  * положено в Kafka, а запись в БД со своим id создаст консьюмер. Возвращать
  * id, которого ещё не существует, значило бы обещать больше, чем сделано.
+ * Найти задачу до появления id можно по {@code correlationKey} через
+ * {@code GET /api/tasks?correlationKey=...}.
  */
 @Schema(description = "Задача принята в обработку")
 public record TaskAcceptedDto(

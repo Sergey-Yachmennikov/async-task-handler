@@ -26,13 +26,8 @@ import static org.awaitility.Awaitility.await;
  */
 @TestPropertySource(properties = {
         "app.recovery.enabled=true",
-        /*
-         * Порог зависания намеренно оставлен штатным: занизить его нельзя,
-         * межполевая проверка требует превышения предельной длительности
-         * задачи и уронила бы контекст. Вместо этого состариваются сами
-         * задачи — им проставляется давний started_at. Ускоряется только
-         * период проверки, чтобы не ждать штатные полминуты.
-         */
+        // Ускоряется только период проверки, чтобы не ждать штатные полминуты;
+        // задачи в тесте состариваются напрямую — им проставляется давний heartbeat_at
         "app.recovery.interval-ms=200",
         "app.recovery.max-retries=2"
 })
@@ -105,6 +100,8 @@ class StuckTaskRecoveryIntegrationTest extends AbstractIntegrationTest {
         Task task = new Task("stuck-task", 1_000L);
         task.setStatus(TaskStatus.IN_PROGRESS);
         task.setStartedAt(startedAt);
+        // Признак зависания — heartbeat_at, а не started_at
+        task.setHeartbeatAt(startedAt);
         task.setRetryCount(retryCount);
         task.setProgress(progress);
         task.setWorkerId("dead-instance");

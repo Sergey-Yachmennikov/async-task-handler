@@ -135,7 +135,8 @@ public class KafkaConfig {
                     return new TopicPartition(properties.kafka().dltTopic(), failed.partition());
                 });
 
-        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, new FixedBackOff(1_000L, 2L));
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer,
+                new FixedBackOff(properties.kafka().retryIntervalMs(), properties.kafka().retryMaxAttempts()));
         handler.addNotRetryableExceptions(InvalidTaskMessageException.class);
         return handler;
     }

@@ -7,6 +7,7 @@ import com.erevan.async_task_handler.metrics.TaskMetrics;
 import com.erevan.async_task_handler.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
@@ -70,11 +71,21 @@ public class TaskRegistrationService {
             taskMetrics.recordRegistered();
             return Optional.of(saved);
         } catch (DataIntegrityViolationException e) {
-            // Сработало уникальное ограничение: значит, эту задачу успел
-            // сохранить кто-то другой между нашей проверкой и вставкой
+            // Сюда попадёт любое нарушение целостности — CHECK на duration,
+            // NOT NULL, длина строки, — а не только наш уникальный индекс.
+            // Без проверки имени ограничения настоящий баг тихо превратился бы
+            // в "дубль", и сообщение пропало бы вместо ухода в DLT
+            if (!isDedupKeyViolation(e)) {
+                throw e;
+            }
             log.info("Повторная доставка отброшена ограничением БД: dedupKey={}", dedupKey);
             taskMetrics.recordDuplicateSkipped();
             return Optional.empty();
         }
+    }
+
+    private boolean isDedupKeyViolation(DataIntegrityViolationException e) {
+        return e.getCause() instanceof ConstraintViolationException cve
+                && "uq_tasks_dedup_key".equals(cve.getConstraintName());
     }
 }

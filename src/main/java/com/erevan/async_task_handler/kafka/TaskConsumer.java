@@ -30,6 +30,12 @@ public class TaskConsumer {
             groupId = "${spring.kafka.consumer.group-id}")
     public void consume(ConsumerRecord<String, TaskRequestDto> message) {
         TaskRequestDto request = message.value();
+        // Пустое тело (tombstone, либо "null" из kafka-ui) даёт value == null.
+        // validator.validate(null) бросает IllegalArgumentException, который
+        // обработчик ошибок считает повторяемым — проверяем явно и уходим в DLT сразу
+        if (request == null) {
+            throw new InvalidTaskMessageException("Сообщение с пустым телом не может быть задачей");
+        }
 
         log.debug("Получено сообщение: partition={}, offset={}, key={}",
                 message.partition(), message.offset(), message.key());
@@ -48,7 +54,9 @@ public class TaskConsumer {
         }
 
         // Ошибки на этом вызове (например, недоступная БД) наоборот устранимы
-        // со временем, поэтому обработчик ошибок их повторит
+        // со временем, поэтому обработчик ошибок их повторит.
+        // Ключ сообщения используется как ключ дедупликации, хотя формально
+        // отвечает только за партиционирование — семантика описана в README
         registrationService.register(request, message.key());
     }
 

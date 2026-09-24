@@ -1,0 +1,12 @@
+# Профиль для локальной разработки: подробный лог приложения и полный вывод
+# health-эндпоинта. Не активируется сам по себе — Docker-образ и docker
+# compose его не выставляют (см. README: конфигурация приходит только
+# извне), включается явно: ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+management:
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.erevan.async_task_handler: DEBUG

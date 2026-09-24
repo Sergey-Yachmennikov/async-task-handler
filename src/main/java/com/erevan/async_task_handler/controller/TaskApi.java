@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import org.springframework.http.ResponseEntity;
 
@@ -48,14 +49,34 @@ public interface TaskApi {
             Long id);
 
     @Operation(
+            summary = "Найти задачу по ключу из ответа POST /api/tasks",
+            description = """
+                    На момент 202-ответа id задачи ещё не существует — в БД её создаёт
+                    консьюмер. correlationKey из этого ответа позволяет найти задачу,
+                    когда она появится.""")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Задача найдена"),
+            @ApiResponse(responseCode = "404", description = "Задача с таким ключом не найдена "
+                    + "(либо ключ неверный, либо консьюмер ещё не обработал сообщение)",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    TaskResponseDto getTaskByCorrelationKey(
+            @Parameter(description = "Ключ из ответа на POST /api/tasks", example = "3f2b9c1e-4a7d-4c3e-9f10-2b8e5d7a1c04")
+            @NotBlank(message = "correlationKey обязателен")
+            String correlationKey);
+
+    @Operation(
             summary = "Поставить задачу в очередь",
             description = """
-                    Публикует задачу в Kafka и сразу отвечает, не дожидаясь выполнения.
-                    Запись в БД создаёт консьюмер, поэтому идентификатор задачи
-                    в ответе отсутствует.""")
+                    Публикует задачу в Kafka, дожидается подтверждения от брокера
+                    и сразу отвечает, не дожидаясь выполнения. Запись в БД создаёт
+                    консьюмер, поэтому идентификатор задачи в ответе отсутствует —
+                    вместо него используется correlationKey, см. GET /api/tasks?correlationKey=.""")
     @ApiResponses({
             @ApiResponse(responseCode = "202", description = "Задача принята в обработку"),
             @ApiResponse(responseCode = "400", description = "Ошибка валидации запроса",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+            @ApiResponse(responseCode = "503", description = "Kafka не подтвердила запись сообщения",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
     ResponseEntity<TaskAcceptedDto> submitTask(@Valid TaskRequestDto request);

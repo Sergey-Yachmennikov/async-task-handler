@@ -6,6 +6,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ExecutorService;
@@ -23,17 +24,30 @@ import java.util.concurrent.atomic.AtomicInteger;
  * в очереди исполнителя, числясь в базе как IN_PROGRESS ещё до того, как их
  * кто-то начал делать.
  */
+/*
+ * @DependsOn("taskRunner") задаёт порядок остановки бинов, а не только их
+ * инициализации. WorkerPool сам не видит ни репозиторий, ни EntityManagerFactory —
+ * задачи ходят в БД через TaskRunner уже из потоков пула, и Spring об этой связи
+ * ничего не знает. Без явной зависимости порядок уничтожения не определён:
+ * EntityManagerFactory и DataSource вправе закрыться раньше, чем здесь истечёт
+ * тайм-аут ожидания, и тогда markCompleted/markFailed доработавших задач упадут
+ * на закрытом пуле соединений. Раз WorkerPool зависит от TaskRunner, а TaskRunner
+ * зависит (через сервисы) от JPA-бинов, Spring обязан уничтожить пул раньше них.
+ */
 @Slf4j
 @Component
 @ConditionalOnProperty(prefix = "app.worker", name = "enabled", havingValue = "true", matchIfMissing = true)
+@DependsOn("taskRunner")
 public class WorkerPool {
 
     private final ExecutorService executor;
     private final Semaphore freeSlots;
     private final int poolSize;
+    private final long shutdownTimeoutMs;
 
     public WorkerPool(AppProperties properties, MeterRegistry meterRegistry) {
         this.poolSize = properties.worker().poolSize();
+        this.shutdownTimeoutMs = properties.worker().shutdownTimeoutMs();
         this.freeSlots = new Semaphore(poolSize);
         this.executor = Executors.newFixedThreadPool(poolSize, namedThreadFactory());
 
@@ -90,16 +104,17 @@ public class WorkerPool {
     /**
      * Останавливает пул, давая текущим задачам доработать.
      * <p>
-     * Задачи, не уложившиеся в отведённое время, прерываются: их статус
-     * останется IN_PROGRESS до перезапуска обработки.
+     * Задачи, не уложившиеся в отведённое время, прерываются: {@code TaskRunner}
+     * ловит {@code InterruptedException} и возвращает такую задачу в NEW, чтобы
+     * её доделал другой инстанс — не дожидаясь восстановления зависших.
      */
     @PreDestroy
     public void shutdown() {
         log.info("Остановка пула воркеров, выполняется задач: {}", poolSize - freeSlots.availablePermits());
         executor.shutdown();
         try {
-            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
-                log.warn("Воркеры не завершились за 30с, прерываем принудительно");
+            if (!executor.awaitTermination(shutdownTimeoutMs, TimeUnit.MILLISECONDS)) {
+                log.warn("Воркеры не завершились за {} мс, прерываем принудительно", shutdownTimeoutMs);
                 executor.shutdownNow();
             }
         } catch (InterruptedException e) {
