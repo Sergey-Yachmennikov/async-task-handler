@@ -18,16 +18,20 @@ import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -122,24 +126,36 @@ class TaskControllerTest {
     @DisplayName("POST, которому Kafka не подтвердила запись, возвращает 503")
     void postWhenKafkaDoesNotAcknowledgeReturnsServiceUnavailable() throws Exception {
         given(taskProducer.send(any(TaskRequestDto.class)))
-                .willThrow(new TaskPublishException("таймаут", new RuntimeException("brokers unavailable")));
+                .willReturn(CompletableFuture.failedFuture(
+                        new TaskPublishException("таймаут", new RuntimeException("brokers unavailable"))));
 
-        mockMvc.perform(post("/api/tasks")
+        // Контроллер асинхронный (CompletableFuture): MockMvc сначала лишь стартует
+        // асинхронную обработку, а её результат нужно дождаться вторым перформом
+        MvcResult mvcResult = mockMvc.perform(post("/api/tasks")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
                                 new TaskRequestDto("generate-report", 5_000L))))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mockMvc.perform(asyncDispatch(mvcResult))
                 .andExpect(status().isServiceUnavailable());
     }
 
     @Test
     @DisplayName("POST валидной задачи возвращает 202 и публикует её в Kafka")
     void postValidTaskReturnsAccepted() throws Exception {
-        given(taskProducer.send(any(TaskRequestDto.class))).willReturn("corr-key-1");
+        given(taskProducer.send(any(TaskRequestDto.class)))
+                .willReturn(CompletableFuture.completedFuture("corr-key-1"));
 
-        mockMvc.perform(post("/api/tasks")
+        MvcResult mvcResult = mockMvc.perform(post("/api/tasks")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
                                 new TaskRequestDto("generate-report", 5_000L))))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mockMvc.perform(asyncDispatch(mvcResult))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.correlationKey").value("corr-key-1"));
 

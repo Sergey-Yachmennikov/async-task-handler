@@ -16,6 +16,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Реализация {@link TaskApi}: привязка к HTTP и вызовы сервисов.
  * Описание для документации и ограничения валидации — в интерфейсе.
@@ -42,10 +44,9 @@ public class TaskController implements TaskApi {
 
     @Override
     @PostMapping
-    public ResponseEntity<TaskAcceptedDto> submitTask(@RequestBody TaskRequestDto request) {
-        String correlationKey = taskProducer.send(request);
-
-        return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .body(new TaskAcceptedDto("Задача принята в обработку", correlationKey));
+    public CompletableFuture<ResponseEntity<TaskAcceptedDto>> submitTask(@RequestBody TaskRequestDto request) {
+        return taskProducer.send(request)
+                .thenApply(correlationKey -> ResponseEntity.status(HttpStatus.ACCEPTED)
+                        .body(new TaskAcceptedDto("Задача принята в обработку", correlationKey)));
     }
 }

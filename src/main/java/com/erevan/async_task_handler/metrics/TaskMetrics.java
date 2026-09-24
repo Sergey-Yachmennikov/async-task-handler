@@ -30,24 +30,31 @@ public class TaskMetrics {
     private final Timer executionTime;
 
     public TaskMetrics(MeterRegistry registry, TaskRepository taskRepository) {
+
         this.registered = Counter.builder("tasks.registered")
                 .description("Задачи, принятые из Kafka и сохранённые в БД")
                 .register(registry);
+
         this.duplicatesSkipped = Counter.builder("tasks.duplicates.skipped")
                 .description("Повторные доставки, отброшенные дедупликацией")
                 .register(registry);
+
         this.claimed = Counter.builder("tasks.claimed")
                 .description("Задачи, захваченные воркерами этого инстанса")
                 .register(registry);
+
         this.failed = Counter.builder("tasks.failed")
                 .description("Задачи, завершившиеся ошибкой")
                 .register(registry);
+
         this.recovered = Counter.builder("tasks.recovered")
                 .description("Зависшие задачи, возвращённые в очередь")
                 .register(registry);
+
         this.exhausted = Counter.builder("tasks.retries.exhausted")
                 .description("Задачи, признанные провалившимися после исчерпания попыток")
                 .register(registry);
+
         this.executionTime = Timer.builder("tasks.execution")
                 .description("Длительность успешного выполнения задачи")
                 .publishPercentiles(0.5, 0.95, 0.99)

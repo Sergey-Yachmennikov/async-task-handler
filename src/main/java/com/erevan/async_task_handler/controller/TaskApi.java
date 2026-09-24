@@ -16,6 +16,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import org.springframework.http.ResponseEntity;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Контракт REST API задач: описание для документации отдельно от реализации.
  * <p>
@@ -71,7 +73,9 @@ public interface TaskApi {
                     Публикует задачу в Kafka, дожидается подтверждения от брокера
                     и сразу отвечает, не дожидаясь выполнения. Запись в БД создаёт
                     консьюмер, поэтому идентификатор задачи в ответе отсутствует —
-                    вместо него используется correlationKey, см. GET /api/tasks?correlationKey=.""")
+                    вместо него используется correlationKey, см. GET /api/tasks?correlationKey=.
+                    Ожидание подтверждения от Kafka асинхронное: поток сервлета
+                    не занят всё это время.""")
     @ApiResponses({
             @ApiResponse(responseCode = "202", description = "Задача принята в обработку"),
             @ApiResponse(responseCode = "400", description = "Ошибка валидации запроса",
@@ -79,5 +83,5 @@ public interface TaskApi {
             @ApiResponse(responseCode = "503", description = "Kafka не подтвердила запись сообщения",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
-    ResponseEntity<TaskAcceptedDto> submitTask(@Valid TaskRequestDto request);
+    CompletableFuture<ResponseEntity<TaskAcceptedDto>> submitTask(@Valid TaskRequestDto request);
 }
